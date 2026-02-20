@@ -1,352 +1,144 @@
-# Tandoor Recipes MCP Server
+# Tandoor MCP
 
-A Model Context Protocol (MCP) server for [Tandoor Recipes](https://tandoor.dev) that provides comprehensive recipe management, shopping lists, meal planning, and inventory tracking capabilities.
+An MCP server that connects AI assistants to [Tandoor Recipes](https://tandoor.dev) — search recipes, manage shopping lists, plan meals, and track inventory through natural conversation.
 
-## Features
+Built in Rust. Single binary, no runtime dependencies.
 
-- **Recipe Management**: Search, create, and manage recipes
-- **Shopping Lists**: Add items, mark as purchased, and manage shopping workflows
-- **Meal Planning**: Plan meals and manage meal schedules
-- **Inventory Tracking**: Monitor pantry items and get recipe suggestions
-- **Keywords & Tags**: Organize recipes with keywords and categories
-- **Cooking Logs**: Track cooking history and ratings
+## What It Does
 
-## Quick Start
+Talk to your Tandoor instance through any MCP-compatible client (Claude Desktop, Claude Code, etc.):
 
-1. **Clone the repository**:
+- **Recipes** — search, view details with scaled ingredients, create new ones, organize with tags and books
+- **Shopping lists** — add items (manually or from recipes), check off purchases, sync to pantry
+- **Meal planning** — schedule meals, browse plans by date range
+- **Inventory** — track what's in your pantry, get recipe suggestions based on available ingredients
+- **Cooking log** — record what you cooked, with ratings and comments
+
+## Setup
+
+### 1. Get the server
+
+**Linux / WSL** — download the prebuilt binary from the [Releases page](https://github.com/iosue-iulianus/tandoor-mcp/releases):
 
 ```bash
-git clone https://github.com/your-repo/mcp-tandoor
-cd mcp-tandoor
+chmod +x mcp-tandoor-linux-x86_64
+./mcp-tandoor-linux-x86_64
 ```
 
-2. **Configure environment variables**:
+**macOS / other platforms / build from source** (requires [Rust 1.85+](https://rustup.rs)):
 
 ```bash
-export TANDOOR_BASE_URL="http://localhost:8080"
-export TANDOOR_USERNAME="admin"
-export TANDOOR_PASSWORD="your-password"
+# Install Rust (if you don't have it)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# Linux only — install OpenSSL dev headers
+sudo apt install pkg-config libssl-dev    # Debian/Ubuntu
+sudo dnf install pkg-config openssl-devel # Fedora/RHEL
+sudo pacman -S pkg-conf openssl           # Arch
+
+# Build and run
+git clone https://github.com/iosue-iulianus/tandoor-mcp.git
+cd tandoor-mcp
+cargo build --release
+./target/release/mcp-tandoor
 ```
 
-3. **Run the server**:
-
-rustup is recommended:
+### 2. Configure
 
 ```bash
-cargo run
+cp .env.example .env
+# Edit .env with your Tandoor URL and credentials
 ```
 
-## Tandoor Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TANDOOR_BASE_URL` | Your Tandoor instance URL | `http://localhost:8080` |
+| `TANDOOR_USERNAME` | Tandoor username | `admin` |
+| `TANDOOR_PASSWORD` | Tandoor password | `admin` |
+| `BIND_ADDR` | Server listen address | `127.0.0.1:3001` |
+| `RUST_LOG` | Log level (`info`, `debug`, `trace`) | `info` |
 
-⚠️ **IMPORTANT**: Tandoor uses a multi-tenant permission system that requires specific setup for API access to work properly. Without proper space and group configuration, you'll get permission errors even with valid authentication.
+The server automatically authenticates with your username and password on startup and caches the API token for the session.
 
-### Method 1: Web Interface Setup (Recommended)
+> **Note:** Tandoor limits login attempts to 10 per day. Normal usage is unaffected since the server only logs in once at startup. If you're restarting the server frequently and hit the limit, you can set `TANDOOR_AUTH_TOKEN` directly in `.env` to skip the login step.
 
-1. **Access Tandoor admin interface**:
+### 3. Connect your MCP client
 
-   - Go to `http://your-tandoor-url/admin/`
-   - Login with superuser credentials
+**Claude Desktop** — add to `claude_desktop_config.json`:
 
-2. **Create/Verify Groups**:
-
-   - Navigate to **Authentication and Authorization** → **Groups**
-   - Ensure these groups exist: `admin`, `user`, `guest`
-   - If missing, create them (names must match exactly)
-
-3. **Create a Space**:
-
-   - Navigate to **Cookbook** → **Spaces**
-   - Click **Add Space**
-   - Fill in:
-     - **Name**: Your organization/space name (e.g., "Production", "Family")
-     - **Max recipes**: 0 (unlimited)
-     - **Max users**: 0 (unlimited)
-     - **Max file storage mb**: 0 (unlimited)
-     - **Allow sharing**: Checked
-   - Click **Save**
-
-4. **Create User Space Association**:
-   - Navigate to **Cookbook** → **User spaces**
-   - Click **Add User space**
-   - Select:
-     - **User**: Your admin user
-     - **Space**: The space you just created
-     - **Active**: Must be checked
-   - Click **Save**
-   - After saving, click on the created User space entry
-   - In **Groups**, select `admin` and add it
-   - Click **Save**
-
-### Method 2: Command Line Setup
-
-If you prefer command line or don't have web admin access:
-
-```bash
-# Enter your Tandoor container
-docker exec -it your-tandoor-container /opt/recipes/venv/bin/python manage.py shell
-
-# Run this Python code:
-from cookbook.models import Space, UserSpace
-from django.contrib.auth.models import User, Group
-
-# Get your admin user (replace 'admin' with your username)
-admin_user = User.objects.get(username='admin')
-
-# Create a space
-space, created = Space.objects.get_or_create(
-    name='Production',  # Choose your space name
-    defaults={
-        'created_by': admin_user,
-        'max_recipes': 0,
-        'max_users': 0,
-        'max_file_storage_mb': 0,
-        'allow_sharing': True
+```json
+{
+  "mcpServers": {
+    "tandoor": {
+      "url": "http://127.0.0.1:3001/sse"
     }
-)
-
-# Associate user with space
-user_space, created = UserSpace.objects.get_or_create(
-    user=admin_user,
-    space=space,
-    defaults={'active': True}
-)
-
-# Ensure it's active if it already existed
-if not created and not user_space.active:
-    user_space.active = True
-    user_space.save()
-
-# Add user to admin group in this space
-admin_group = Group.objects.get(name='admin')
-user_space.groups.add(admin_group)
+  }
+}
 ```
 
-### Verification
-
-Test that your setup is working:
+**Claude Code:**
 
 ```bash
-# Get an API token
-curl -X POST http://your-tandoor-url/api-token-auth/ \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"your-password"}'
-
-# Test API access
-curl -X GET http://your-tandoor-url/api/keyword/ \
-  -H "Authorization: Bearer <YOUR_TOKEN>"
+claude mcp add tandoor --transport sse http://127.0.0.1:3001/sse
 ```
 
-You should get a JSON response with keywords
+## Tools
 
-## Configuration
+| Tool | Description |
+|------|-------------|
+| `search_recipes` | Search recipes with flexible querying and pagination |
+| `get_recipe_details` | Full recipe info with scaled ingredients |
+| `create_recipe` | Create a new recipe with instructions, times, and tags |
+| `update_recipe_keywords` | Set or append tags on a recipe |
+| `get_recipe_books` | List recipe books/collections |
+| `create_recipe_book` | Create a new recipe book |
+| `add_recipe_to_book` | Add a recipe to a book |
+| `add_to_shopping_list` | Add items manually or from a recipe |
+| `get_shopping_list` | View current shopping list |
+| `check_shopping_items` | Mark items as purchased |
+| `clear_shopping_list` | Clear checked items and update pantry |
+| `search_foods` | Fuzzy search for foods/ingredients |
+| `update_pantry` | Update pantry inventory status |
+| `suggest_from_inventory` | Recipe suggestions from what you have on hand |
+| `get_meal_plans` | View meal plans for a date range |
+| `create_meal_plan` | Schedule a meal |
+| `delete_meal_plan` | Remove a meal plan entry |
+| `get_meal_types` | List available meal type categories |
+| `get_keywords` | List all recipe tags |
+| `get_units` | List measurement units |
+| `get_cook_log` | View cooking history |
+| `log_cooked_recipe` | Log a cooked recipe with rating and comments |
 
-### Environment Variables
+## Tandoor Permissions
 
-| Variable           | Description                         | Default                 |
-| ------------------ | ----------------------------------- | ----------------------- |
-| `TANDOOR_BASE_URL` | Full URL to your Tandoor instance   | `http://localhost:8080` |
-| `TANDOOR_USERNAME` | Username for Tandoor authentication | `admin`                 |
-| `TANDOOR_PASSWORD` | Password for Tandoor authentication | `admin`                 |
-| `BIND_ADDR`        | Address and port for the MCP server | `127.0.0.1:3001`        |
+Tandoor uses a multi-tenant Space system. Your API user needs to be assigned to a Space with the `admin` group role and marked as **Active**.
 
-### Runtime Configuration
-
-```bash
-# Example with custom configuration
-TANDOOR_BASE_URL="https://recipes.mycompany.com" \
-TANDOOR_USERNAME="api-user" \
-TANDOOR_PASSWORD="secure-password" \
-BIND_ADDR="0.0.0.0:8000" \
-cargo run
-```
-
-## Available Tools
-
-The MCP server provides the following tools:
-
-### Recipe Management
-
-- `search_recipes` - Search for recipes with flexible querying
-- `get_recipe_details` - Get comprehensive recipe information with scaled ingredients
-- `create_recipe` - Create a new recipe
-- `import_recipe_from_url` - Import a recipe from an external URL
-
-### Shopping Lists
-
-- `add_to_shopping_list` - Add items to shopping list with intelligent consolidation
-- `get_shopping_list` - Get current shopping list organized by store section
-- `check_shopping_items` - Mark shopping list items as checked/purchased
-- `clear_shopping_list` - Clear checked items from shopping list and update pantry
-
-### Food & Inventory
-
-- `search_foods` - Search for foods/ingredients with fuzzy name matching
-- `update_pantry` - Update pantry inventory status
-- `suggest_from_inventory` - Get recipe suggestions based on current inventory
-
-### Meal Planning
-
-- `get_meal_plans` - Get meal plans for a date range
-- `create_meal_plan` - Create a new meal plan
-- `delete_meal_plan` - Delete a meal plan
-- `get_meal_types` - Get available meal types
-
-### Metadata
-
-- `get_keywords` - Get all available recipe keywords/tags
-- `get_units` - Get available measurement units
-
-### Cooking History
-
-- `get_cook_log` - Get cooking history
-- `log_cooked_recipe` - Log a cooked recipe
+The quickest way: go to `http://your-tandoor/admin/` and ensure your user has a UserSpace entry with an active admin group assignment. See the [Tandoor docs](https://docs.tandoor.dev) for details.
 
 ## Troubleshooting
 
-### "Authentication credentials were not provided"
-
-This indicates the OAuth2 token format is wrong. Ensure you're using:
-
-- `Authorization: Bearer YOUR_TOKEN`
-- Token from the `/api-token-auth/` endpoint
-
-### "You do not have permission to perform this action"
-
-This is a Tandoor permissions issue:
-
-1. **Check user is in a group**:
-
-```python
-user = User.objects.get(username='your-username')
-print(f"Groups: {[g.name for g in user.groups.all()]}")
-```
-
-2. **Check UserSpace is active**:
-
-```python
-user_spaces = UserSpace.objects.filter(user=user)
-for us in user_spaces:
-    print(f"Space: {us.space.name}, Active: {us.active}")
-```
-
-3. **Most common fix**:
-
-```python
-# Make sure UserSpace is active
-user_space = UserSpace.objects.get(user=user)
-user_space.active = True
-user_space.save()
-```
-
-### "Request was throttled"
-
-Tandoor has rate limiting. Wait before retrying, or check if you're making too many authentication requests. The MCP server implements shared authentication to prevent this.
-
-### Connection Refused / Network Errors
-
-- Verify `TANDOOR_BASE_URL` is correct and accessible
-- Check if Tandoor is running: `curl http://your-tandoor-url/`
-- Verify firewall/network configuration
-
-### Django Scopes Error
-
-```
-ScopeError: A scope on dimension(s) space needs to be active for this query
-```
-
-This means the space scope isn't activated. Follow the Tandoor Configuration section above to fix permissions.
+| Problem | Fix |
+|---------|-----|
+| "Authentication credentials were not provided" | Token missing or malformed — use `Bearer YOUR_TOKEN` |
+| "You do not have permission" | User not assigned to an active Space with a group role |
+| "Request was throttled" / 429 | Hit the 10 login/day limit — switch to `TANDOOR_AUTH_TOKEN` |
+| `ScopeError: ...space needs to be active` | UserSpace doesn't exist or `active` is false |
 
 ## Development
 
-### Building from Source
-
 ```bash
-# Clone the repository
-git clone https://github.com/your-repo/mcp-tandoor
-cd mcp-tandoor
+RUST_LOG=debug cargo run          # Run with debug logging
 
-# Build in development mode
-cargo build
-
-# Run with debug logging
-RUST_LOG=debug cargo run
+./scripts/test.sh up              # Start local Tandoor (Docker)
+./scripts/test.sh test            # Run tests
+./scripts/test.sh down            # Stop local Tandoor
 ```
 
-### Running Tests
+## Acknowledgments
 
-The project includes a comprehensive testing script that manages Docker services and runs integration tests:
+Originally forked from [ChristopherJMiller/tandoor-mcp](https://github.com/ChristopherJMiller/tandoor-mcp).
 
-```bash
-# Run full test suite (clean start, run tests, cleanup)
-./scripts/test.sh test
+## License
 
-# Keep services running after tests (for debugging)
-./scripts/test.sh test --keep-running
-
-# Run tests with verbose output
-./scripts/test.sh test --verbose
-
-# Manual service management
-./scripts/test.sh up      # Start Tandoor services
-./scripts/test.sh down    # Stop services
-./scripts/test.sh reset   # Clean and restart services
-./scripts/test.sh clean   # Clean volumes only
-./scripts/test.sh logs    # View service logs
-```
-
-**Testing Requirements:**
-
-- Docker and Docker Compose installed
-- Ports 8080 (Tandoor) and 5432 (PostgreSQL) available
-- Sufficient disk space for Docker volumes
-
-**Note on Rate Limiting:** Tandoor limits authentication to 10 requests per day. The test script automatically obtains and shares a single token across all tests to avoid hitting this limit.
-
-## Rate Limiting Considerations
-
-Tandoor has extremely aggressive rate limiting on authentication endpoints:
-
-- **10 authentication requests per day per IP address**
-- Rate limit resets at midnight UTC or when Tandoor is restarted
-- Exceeding the limit returns `429 Too Many Requests`
-
-### Handling Rate Limits during Verification
-
-1. **Token Sharing**: Uses global token storage to share authentication across all tool calls
-2. **Environment Token**: Accepts `TANDOOR_AUTH_TOKEN` to bypass authentication entirely
-3. **Graceful Fallback**: Falls back to stored credentials if token expires
-
-### Best Practices
-
-```bash
-# Get a token once and reuse it
-TOKEN=$(curl -X POST http://localhost:8080/api-token-auth/ \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"your-password"}' | jq -r .token)
-
-# Use the token for all subsequent requests
-TANDOOR_AUTH_TOKEN="$TOKEN" cargo run
-```
-
-### Development Workflow
-
-```bash
-# Start Tandoor and get a fresh token
-./scripts/test.sh up
-TOKEN=$(./scripts/get_token.sh admin testing1 http://localhost:8080)
-
-# Use the token for development
-TANDOOR_AUTH_TOKEN="$TOKEN" cargo run
-
-# When done for the day
-./scripts/test.sh down
-```
-
-### If You Hit the Rate Limit
-
-1. **Wait until midnight UTC** (rate limit resets)
-2. **Restart Tandoor** to reset the counter:
-   ```bash
-   docker restart your-tandoor-container
-   ```
-3. **Use an existing token** if you have one saved
+MIT

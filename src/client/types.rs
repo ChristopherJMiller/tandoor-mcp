@@ -84,9 +84,9 @@ pub struct Recipe {
     /// Recipe image URL or path
     #[serde(default)]
     pub image: Option<String>,
-    /// User ID who created this recipe
+    /// User who created this recipe (may be an object or integer)
     #[serde(default)]
-    pub created_by: Option<i32>,
+    pub created_by: Option<serde_json::Value>,
     /// Original source URL if imported
     #[serde(default)]
     pub source_url: Option<String>,
@@ -285,9 +285,9 @@ pub struct Food {
     pub name: String,
     pub plural_name: Option<String>,
     pub description: Option<String>,
-    pub recipe: Option<i32>,
+    pub recipe: Option<serde_json::Value>,
     pub food_onhand: bool,
-    pub supermarket_category: Option<i32>,
+    pub supermarket_category: Option<serde_json::Value>,
     pub inherit_fields: Vec<InheritField>,
     pub properties: Vec<FoodProperty>,
 }
@@ -299,6 +299,7 @@ pub struct Unit {
     pub plural_name: Option<String>,
     pub description: Option<String>,
     pub base_unit: Option<String>,
+    #[serde(rename = "type", default)]
     pub type_: Option<String>,
 }
 
@@ -354,10 +355,10 @@ pub struct ShoppingListEntry {
     pub completed: Option<DateTime<Utc>>,
     /// Optional delay before showing this item
     pub delay_until: Option<DateTime<Utc>>,
-    /// User who added this entry
-    pub created_by: i32,
-    /// User who marked this as completed
-    pub completed_by: Option<i32>,
+    /// User who added this entry (may be an object or integer)
+    pub created_by: serde_json::Value,
+    /// User who marked this as completed (may be an object or integer)
+    pub completed_by: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -371,7 +372,7 @@ pub struct MealPlan {
     pub meal_type: MealType,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
-    pub created_by: i32,
+    pub created_by: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -381,7 +382,7 @@ pub struct MealType {
     pub order: i32,
     pub color: String,
     pub default: bool,
-    pub created_by: i32,
+    pub created_by: serde_json::Value,
     pub icon: Option<String>,
 }
 
@@ -393,7 +394,7 @@ pub struct CookLog {
     pub rating: Option<i32>,
     pub comment: Option<String>,
     pub created: DateTime<Utc>,
-    pub created_by: i32,
+    pub created_by: serde_json::Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -503,4 +504,45 @@ pub struct UpdateShoppingListEntryRequest {
 #[derive(Debug, Serialize)]
 pub struct BulkShoppingListRequest {
     pub entries: Vec<CreateShoppingListEntryRequest>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateRecipeKeywordsRequest {
+    pub keywords: Vec<CreateKeywordRequest>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecipeBook {
+    pub id: i32,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_by: serde_json::Value,
+    #[serde(default)]
+    pub filter: Option<serde_json::Value>,
+    #[serde(default)]
+    pub order: Option<i32>,
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RecipeBookEntry {
+    pub id: i32,
+    pub book: i32,
+    pub book_content: Option<serde_json::Value>,
+    pub recipe: i32,
+    pub recipe_content: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateRecipeBookRequest {
+    pub name: String,
+    pub description: String,
+    pub shared: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateRecipeBookEntryRequest {
+    pub book: i32,
+    pub recipe: i32,
 }

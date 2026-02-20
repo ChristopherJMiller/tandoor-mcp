@@ -41,6 +41,9 @@ pub struct SearchRecipesParams {
     pub query: Option<String>,
     #[serde(default)]
     pub limit: Option<i32>,
+    /// 1-indexed page number for pagination
+    #[serde(default)]
+    pub page: Option<i32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -204,6 +207,34 @@ fn default_mode() -> String {
 
 fn default_days_until_expiry() -> i32 {
     3
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateRecipeKeywordsParams {
+    /// The recipe ID to update
+    pub recipe_id: i32,
+    /// List of keyword names to set or append
+    pub keywords: Vec<String>,
+    /// "set" (default) replaces all keywords; "add" appends to existing
+    #[serde(default = "default_keyword_mode")]
+    pub mode: String,
+}
+
+fn default_keyword_mode() -> String {
+    "set".to_string()
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateRecipeBookParams {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddRecipeToBookParams {
+    pub book_id: i32,
+    pub recipe_id: i32,
 }
 
 // Global shared authentication state
@@ -411,10 +442,12 @@ impl TandoorMcpServer {
         };
 
         match client
-            .search_recipes(params.query.as_deref(), params.limit)
+            .search_recipes(params.query.as_deref(), params.limit, params.page)
             .await
         {
             Ok(response) => {
+                let has_next = response.next.is_some();
+                let current_page = params.page.unwrap_or(1);
                 let recipes_json: Vec<serde_json::Value> = response.results
                     .into_iter()
                     .map(|recipe| {
@@ -434,6 +467,8 @@ impl TandoorMcpServer {
                 let result = json!({
                     "recipes": recipes_json,
                     "total_count": response.count,
+                    "current_page": current_page,
+                    "next_page": if has_next { Some(current_page + 1) } else { None },
                     "search_interpretation": format!("Found {} recipes{}",
                         response.count,
                         params.query.as_ref().map_or(String::new(), |q| format!(" matching '{q}'"))
@@ -631,6 +666,179 @@ impl TandoorMcpServer {
                     error.to_string(),
                 )]))
             }
+        }
+    }
+
+    #[tool(
+        description = "Update the keywords/tags on an existing recipe. Use mode='set' to replace all tags (default), or mode='add' to append to existing tags."
+    )]
+    async fn update_recipe_keywords(
+        &self,
+        Parameters(params): Parameters<UpdateRecipeKeywordsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::error!("Authentication failed in update_recipe_keywords: {}", e);
+                let error = json!({
+                    "error": "Authentication Error",
+                    "message": "Failed to authenticate with Tandoor",
+                    "details": e.to_string(),
+                    "suggestion": "Check your Tandoor credentials and server connectivity"
+                });
+                return Ok(CallToolResult::error(vec![Content::text(
+                    serde_json::to_string_pretty(&error).unwrap(),
+                )]));
+            }
+        };
+
+        // If "add" mode, fetch existing keywords first and merge
+        let final_keywords = if params.mode == "add" {
+            match client.get_recipe(params.recipe_id).await {
+                Ok(recipe) => {
+                    let mut all_keywords: Vec<String> =
+                        recipe.keywords.into_iter().map(|k| k.name).collect();
+                    for kw in &params.keywords {
+                        if !all_keywords.contains(kw) {
+                            all_keywords.push(kw.clone());
+                        }
+                    }
+                    all_keywords
+                }
+                Err(e) => {
+                    let error = json!({
+                        "error": "Failed to fetch existing recipe keywords",
+                        "details": e.to_string()
+                    });
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        error.to_string(),
+                    )]));
+                }
+            }
+        } else {
+            params.keywords
+        };
+
+        let keyword_requests = final_keywords
+            .into_iter()
+            .map(|name| crate::client::types::CreateKeywordRequest { name })
+            .collect();
+
+        match client
+            .patch_recipe_keywords(params.recipe_id, keyword_requests)
+            .await
+        {
+            Ok(recipe) => {
+                let result = json!({
+                    "id": recipe.id,
+                    "name": recipe.name,
+                    "keywords": recipe.keywords.into_iter().map(|k| k.name).collect::<Vec<_>>(),
+                    "success": true
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(&result).unwrap(),
+                )]))
+            }
+            Err(e) => {
+                let error = json!({
+                    "error": "Failed to update recipe keywords",
+                    "details": e.to_string(),
+                    "success": false
+                });
+                Ok(CallToolResult::error(vec![Content::text(
+                    error.to_string(),
+                )]))
+            }
+        }
+    }
+
+    #[tool(description = "Get all recipe books")]
+    async fn get_recipe_books(&self) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        match client.get_recipe_books().await {
+            Ok(response) => {
+                let books: Vec<serde_json::Value> = response
+                    .results
+                    .into_iter()
+                    .map(|b| json!({"id": b.id, "name": b.name, "description": b.description}))
+                    .collect();
+                Ok(CallToolResult::success(vec![Content::text(
+                    serde_json::to_string_pretty(
+                        &json!({"books": books, "total_count": response.count}),
+                    )
+                    .unwrap(),
+                )]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to get recipe books", "details": e.to_string()})
+                    .to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Create a new recipe book (collection)")]
+    async fn create_recipe_book(
+        &self,
+        Parameters(params): Parameters<CreateRecipeBookParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        let request = crate::client::types::CreateRecipeBookRequest {
+            name: params.name,
+            description: params.description.unwrap_or_default(),
+            shared: vec![],
+        };
+
+        match client.create_recipe_book(request).await {
+            Ok(book) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(
+                    &json!({"id": book.id, "name": book.name, "description": book.description, "success": true}),
+                ).unwrap(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to create recipe book", "details": e.to_string()}).to_string(),
+            )])),
+        }
+    }
+
+    #[tool(description = "Add a recipe to a recipe book")]
+    async fn add_recipe_to_book(
+        &self,
+        Parameters(params): Parameters<AddRecipeToBookParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = match self.ensure_authenticated().await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    json!({"error": "Authentication Error", "details": e.to_string()}).to_string(),
+                )]));
+            }
+        };
+
+        match client.add_recipe_to_book(params.book_id, params.recipe_id).await {
+            Ok(entry) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(
+                    &json!({"id": entry.id, "book_id": entry.book, "recipe_id": entry.recipe, "success": true}),
+                ).unwrap(),
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(
+                json!({"error": "Failed to add recipe to book", "details": e.to_string()}).to_string(),
+            )])),
         }
     }
 
@@ -1092,9 +1300,10 @@ impl TandoorMcpServer {
                     })
                     .collect();
 
+                let total_count = meal_plans_json.len();
                 let result = json!({
                     "meal_plans": meal_plans_json,
-                    "total_count": meal_plans_json.len(),
+                    "total_count": total_count,
                     "date_range": format!("{} to {}", params.from_date, params.to_date),
                     "meal_type_filter": params.meal_type
                 });
@@ -1740,7 +1949,7 @@ impl TandoorMcpServer {
                 }
 
                 // Search for recipes that can use these ingredients
-                match client.search_recipes(None, Some(20)).await {
+                match client.search_recipes(None, Some(20), None).await {
                     Ok(recipes_response) => {
                         let mut recipe_suggestions = Vec::new();
 
@@ -1829,13 +2038,14 @@ impl TandoorMcpServer {
                         // Take top 10
                         recipe_suggestions.truncate(10);
 
+                        let suggestion_count = recipe_suggestions.len();
                         let result = json!({
                             "suggestions": recipe_suggestions,
                             "available_ingredients": available_foods.iter().map(|f| &f.name).collect::<Vec<_>>(),
                             "mode": params.mode,
                             "total_available": available_foods.len(),
                             "message": format!("Found {} recipe suggestions using your {} available ingredients",
-                                recipe_suggestions.len(), available_foods.len())
+                                suggestion_count, available_foods.len())
                         });
 
                         Ok(CallToolResult::success(vec![Content::text(

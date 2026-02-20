@@ -15,7 +15,7 @@ async fn test_search_recipes_no_query() {
         .expect("Failed to create test environment");
 
     // Search without query should return all recipes
-    let result = env.client.search_recipes(None, Some(5)).await;
+    let result = env.client.search_recipes(None, Some(5), None).await;
 
     assert!(result.is_ok(), "Search should succeed");
     let response = result.unwrap();
@@ -33,7 +33,10 @@ async fn test_search_recipes_with_query() {
         .expect("Failed to create test environment");
 
     // Search with a specific query
-    let result = env.client.search_recipes(Some("pasta"), Some(5)).await;
+    let result = env
+        .client
+        .search_recipes(Some("pasta"), Some(5), None)
+        .await;
 
     assert!(result.is_ok(), "Search should succeed");
     let response = result.unwrap();

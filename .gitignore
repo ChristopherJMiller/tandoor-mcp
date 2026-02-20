@@ -8,6 +8,8 @@
 /mediafiles
 
 .mcp.json
+.env
+.env.dev
 
 # IDE
 .idea/
@@ -21,5 +23,6 @@
 
 # Logs
 *.log
+*.bak
 
 tandoor/

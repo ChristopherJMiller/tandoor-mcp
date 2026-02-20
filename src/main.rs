@@ -7,9 +7,9 @@
 //! ## Environment Variables
 //!
 //! - `TANDOOR_BASE_URL`: Tandoor server URL (default: http://localhost:8080)
-//! - `TANDOOR_USERNAME`: Tandoor username for authentication (default: admin)  
+//! - `TANDOOR_USERNAME`: Tandoor username for authentication (default: admin)
 //! - `TANDOOR_PASSWORD`: Tandoor password for authentication (default: admin)
-//! - `BIND_ADDR`: Address to bind the MCP server (default: 127.0.0.1:3001)
+//! - `TANDOOR_AUTH_TOKEN`: Pre-set auth token to bypass username/password auth (avoids rate limiting)
 //! - `RUST_LOG`: Logging level (info, debug, trace, etc.)
 //!
 //! ## Usage
@@ -22,19 +22,22 @@
 //! ```
 
 use mcp_tandoor::server::TandoorMcpServer;
-use rmcp::transport::sse_server::{SseServer, SseServerConfig};
+use rmcp::ServiceExt;
 use std::env;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
+    // Load .env file if present (silently ignored if not found)
+    let _ = dotenvy::dotenv();
+
+    // Initialize tracing — MUST write to stderr since stdout is the MCP transport
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".to_string().into()),
         )
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
         .init();
 
     // Get configuration from environment variables
@@ -45,17 +48,21 @@ async fn main() -> anyhow::Result<()> {
 
     let password = env::var("TANDOOR_PASSWORD").unwrap_or_else(|_| "admin".to_string());
 
-    let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3001".to_string());
-
-    // Test authentication and validate token
+    // Create server and authenticate
     tracing::info!("Validating Tandoor credentials...");
-    let test_server = TandoorMcpServer::new_with_credentials(
+    let server = TandoorMcpServer::new_with_credentials(
         base_url.clone(),
         username.clone(),
         password.clone(),
     );
 
-    if let Err(e) = test_server
+    if let Ok(token) = env::var("TANDOOR_AUTH_TOKEN") {
+        tracing::info!("Using pre-set token from TANDOOR_AUTH_TOKEN");
+        server
+            .set_global_auth_token(token)
+            .await
+            .expect("Failed to set auth token");
+    } else if let Err(e) = server
         .authenticate(username.clone(), password.clone())
         .await
     {
@@ -65,61 +72,30 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!("  - TANDOOR_USERNAME is correct: {}", username);
         tracing::error!("  - TANDOOR_PASSWORD is correct");
         tracing::error!("  - Tandoor server is running and accessible");
-        tracing::error!("  - Check if you're being rate limited (wait before retrying)");
         std::process::exit(1);
     }
 
-    // Test that we can actually use the token to make an API call
+    // Test that we can actually use the token
     tracing::info!("Testing API access with token...");
-    match test_server.test_api_access().await {
+    match server.test_api_access().await {
         Ok(_) => {
             tracing::info!("API access test passed");
         }
         Err(e) => {
             tracing::warn!("API access test failed: {}", e);
-            tracing::warn!("This may be due to Tandoor permission configuration.");
             tracing::warn!("The server will continue, but some functionality may be limited.");
-            tracing::warn!(
-                "If you encounter issues, check Tandoor space permissions and user roles."
-            );
         }
     }
 
-    tracing::info!("Successfully authenticated and validated API access with Tandoor");
+    tracing::info!("Starting Tandoor MCP Server on stdio transport");
 
-    // Create server configuration and start SSE server
-    let config = SseServerConfig {
-        bind: bind_addr.parse()?,
-        sse_path: "/sse".to_string(),
-        post_path: "/message".to_string(),
-        ct: tokio_util::sync::CancellationToken::new(),
-        sse_keep_alive: None,
-    };
+    // Run server over stdio (stdin/stdout)
+    let service = server.serve(rmcp::transport::io::stdio()).await?;
 
-    tracing::info!("Tandoor MCP Server listening on {}", config.bind);
+    // Wait until the client disconnects
+    service.waiting().await?;
 
-    // serve_with_config handles binding, axum server setup, and graceful shutdown internally
-    let sse_server = SseServer::serve_with_config(config).await?;
-
-    // Add the Tandoor service with authentication credentials
-    let base_url_clone = base_url.clone();
-    let username_clone = username.clone();
-    let password_clone = password.clone();
-
-    let ct = sse_server.with_service(move || {
-        TandoorMcpServer::new_with_credentials(
-            base_url_clone.clone(),
-            username_clone.clone(),
-            password_clone.clone(),
-        )
-    });
-
-    tracing::info!("Tandoor MCP Server started successfully");
-
-    // Wait for Ctrl+C
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Shutting down...");
-    ct.cancel();
+    tracing::info!("Tandoor MCP Server shutting down");
 
     Ok(())
 }
