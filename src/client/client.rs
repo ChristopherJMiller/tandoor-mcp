@@ -1,8 +1,11 @@
 //! HTTP client implementation for the Tandoor API.
 
 use crate::client::{auth::TandoorAuth, types::*};
-use anyhow::Result;
-use reqwest::Client;
+use anyhow::{Context, Result};
+use reqwest::{Client, Url};
+use serde::de::DeserializeOwned;
+
+const MAX_PAGINATION_PAGES: usize = 100;
 
 /// # Tandoor HTTP Client
 ///
@@ -96,6 +99,87 @@ impl TandoorClient {
                 anyhow::bail!("Not authenticated - please verify credentials and re-authenticate")
             }
         }
+    }
+
+    /// Resolve a pagination link onto the configured Tandoor origin.
+    ///
+    /// Tandoor may return absolute links based on an internal reverse-proxy
+    /// hostname. Reusing only the path and query supports that setup without
+    /// forwarding the bearer token to an API-provided host.
+    fn api_page_url(&self, page_url: &str) -> Result<Url> {
+        let mut base = Url::parse(&self.base_url).context("Invalid Tandoor base URL")?;
+        anyhow::ensure!(
+            matches!(base.scheme(), "http" | "https"),
+            "Tandoor base URL must use HTTP or HTTPS"
+        );
+        if !base.path().ends_with('/') {
+            let path = format!("{}/", base.path());
+            base.set_path(&path);
+        }
+
+        let supplied = match Url::parse(page_url) {
+            Ok(url) => url,
+            Err(_) => base.join(page_url).context("Invalid Tandoor page URL")?,
+        };
+        base.set_path(supplied.path());
+        base.set_query(supplied.query());
+        base.set_fragment(None);
+        Ok(base)
+    }
+
+    /// Fetch every page of a Django REST Framework collection.
+    ///
+    /// The page cap prevents a malformed or cyclic `next` link from causing an
+    /// unbounded request loop.
+    async fn get_all_paginated<T>(
+        &self,
+        initial_url: String,
+        resource: &str,
+    ) -> Result<PaginatedResponse<T>>
+    where
+        T: DeserializeOwned,
+    {
+        let auth_header = self.get_auth_header()?;
+        let mut next = Some(initial_url);
+        let mut results = Vec::new();
+        let mut count = None;
+        let mut pages = 0;
+
+        while let Some(page_url) = next {
+            pages += 1;
+            anyhow::ensure!(
+                pages <= MAX_PAGINATION_PAGES,
+                "Refusing to read more than {MAX_PAGINATION_PAGES} pages of {resource}"
+            );
+
+            let page_url = self.api_page_url(&page_url)?;
+            let response = self
+                .client
+                .get(page_url)
+                .header("Authorization", &auth_header)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to connect to Tandoor API: {e}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                let error_body = response.text().await.unwrap_or_default();
+                anyhow::bail!("Failed to list {resource}: {status} - {error_body}");
+            }
+
+            let mut page: PaginatedResponse<T> = response.json().await.with_context(|| {
+                format!("Invalid paginated response from Tandoor while listing {resource}")
+            })?;
+            count.get_or_insert(page.count);
+            next = page.next.take();
+            results.append(&mut page.results);
+        }
+
+        Ok(PaginatedResponse {
+            count: count.unwrap_or(results.len() as i32),
+            next: None,
+            previous: None,
+            results,
+        })
     }
 
     // Recipe operations
@@ -802,62 +886,9 @@ impl TandoorClient {
 
     // Utility operations
     pub async fn get_keywords(&self) -> Result<PaginatedResponse<Keyword>> {
-        let auth_header = self.get_auth_header()?;
-        let url = format!("{}/api/keyword/", self.base_url);
-
-        tracing::debug!("Making request to get keywords: {}", url);
-
-        let response = self
-            .client
-            .get(&url)
-            .header("Authorization", auth_header)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!("Network error getting keywords: {}", e);
-                anyhow::anyhow!("Failed to connect to Tandoor API: {}", e)
-            })?;
-
-        let status = response.status();
-        tracing::debug!("Keywords response status: {}", status);
-
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unable to read error response".to_string());
-            tracing::error!(
-                "Failed to get keywords with status {}: {}",
-                status,
-                error_body
-            );
-
-            match status.as_u16() {
-                401 => anyhow::bail!("Authentication expired or invalid. Please re-authenticate."),
-                403 => anyhow::bail!("Access denied to keywords endpoint. Check user permissions."),
-                404 => anyhow::bail!(
-                    "Keywords endpoint not found. Check Tandoor version and API availability."
-                ),
-                500..=599 => anyhow::bail!(
-                    "Tandoor server error getting keywords ({}): {}",
-                    status,
-                    error_body
-                ),
-                _ => anyhow::bail!(
-                    "Failed to get keywords with status {}: {}",
-                    status,
-                    error_body
-                ),
-            }
-        }
-
-        let keywords: PaginatedResponse<Keyword> = response.json().await.map_err(|e| {
-            tracing::error!("Failed to parse keywords response: {}", e);
-            anyhow::anyhow!("Invalid response format from Tandoor server: {}", e)
-        })?;
-
-        tracing::debug!("Successfully retrieved {} keywords", keywords.count);
-        Ok(keywords)
+        let url = format!("{}/api/keyword/?page_size=100", self.base_url);
+        tracing::debug!("Getting all keywords from Tandoor: {}", url);
+        self.get_all_paginated(url, "keywords").await
     }
 
     pub async fn get_units(&self) -> Result<PaginatedResponse<Unit>> {
@@ -909,5 +940,71 @@ impl TandoorClient {
 
         tracing::debug!("Successfully retrieved {} units", units.count);
         Ok(units)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    #[tokio::test]
+    async fn get_keywords_follows_all_pages_on_the_tandoor_origin() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for page in 1..=2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let bytes_read = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..bytes_read]);
+                let request_lowercase = request.to_ascii_lowercase();
+
+                assert!(request_lowercase.contains("\r\nauthorization: bearer test-token\r\n"));
+                if page == 1 {
+                    assert!(request.starts_with("GET /api/keyword/?page_size=100 HTTP/1.1"));
+                } else {
+                    assert!(request.starts_with("GET /api/keyword/?page=2 HTTP/1.1"));
+                }
+
+                let body = if page == 1 {
+                    serde_json::json!({
+                        "count": 2,
+                        "next": "https://untrusted.example/api/keyword/?page=2",
+                        "previous": null,
+                        "results": [{"id": 1, "name": "Dinner"}]
+                    })
+                } else {
+                    serde_json::json!({
+                        "count": 2,
+                        "next": null,
+                        "previous": "/api/keyword/?page=1",
+                        "results": [{"id": 2, "name": "Low histamine"}]
+                    })
+                }
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut client = TandoorClient::new(format!("http://{address}"));
+        client.set_token("test-token".to_string());
+        let keywords = client.get_keywords().await.unwrap();
+
+        assert_eq!(keywords.count, 2);
+        assert_eq!(keywords.results.len(), 2);
+        assert_eq!(keywords.results[0].name, "Dinner");
+        assert_eq!(keywords.results[1].name, "Low histamine");
+        assert!(keywords.next.is_none());
+        assert!(keywords.previous.is_none());
+        server.await.unwrap();
     }
 }

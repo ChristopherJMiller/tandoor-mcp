@@ -193,7 +193,8 @@ The MCP server provides the following tools:
 
 ### Metadata
 
-- `get_keywords` - Get all available recipe keywords/tags
+- `get_keywords` - Get all available recipe keywords/tags across every API page
+  (see [MCP tool behavior](docs/mcp.md#keyword-listing))
 - `get_units` - Get available measurement units
 
 ### Cooking History
